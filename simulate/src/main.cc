@@ -33,6 +33,18 @@
 #include "simulate.h"
 #include "array_safety.h"
 #include "unitree_sdk2_bridge.h"
+
+#include <rclcpp/rclcpp.hpp>
+#include <sensor_msgs/msg/point_cloud2.hpp>
+#include <sensor_msgs/point_cloud2_iterator.hpp>
+#include <tf2/LinearMath/Quaternion.h>
+#include <random>
+#include <omp.h>
+
+std::shared_ptr<rclcpp::Node> ros_node;
+rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr neck_lidar_pub;
+rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr head_lidar_pub;
+
 #include "param.h"
 
 #define MUJOCO_PLUGIN_DIR "mujoco_plugin"
@@ -503,6 +515,100 @@ namespace
 
                 // call mj_step
                 mj_step(m, d);
+
+          // Lidar scanning simulation at 10Hz
+          static double last_lidar_time = 0;
+          if (d->time - last_lidar_time >= 0.1 && ros_node) {
+              last_lidar_time = d->time;
+              int neck_site_id = mj_name2id(m, mjOBJ_SITE, "neck_lidar_site");
+              int head_site_id = mj_name2id(m, mjOBJ_SITE, "head_lidar_site");
+              
+              auto publish_lidar = [&](int site_id, const std::string& frame_id, rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pub, int num_rays) {
+                  if (site_id < 0 || !pub || pub->get_subscription_count() == 0) return;
+
+                  mjtNum pos[3];
+                  mjtNum mat[9];
+                  mju_copy3(pos, d->site_xpos + 3 * site_id);
+                  mju_copy(mat, d->site_xmat + 9 * site_id, 9);
+                  int body_id = m->site_bodyid[site_id];
+
+                  // Pre-generate random directions sequentially (RNG is not thread-safe)
+                  static std::mt19937 gen(std::random_device{}());
+                  std::uniform_real_distribution<double> dist_theta(-3.1415926535, 3.1415926535);
+                  std::uniform_real_distribution<double> dist_sin_phi(std::sin(-0.26), std::sin(0.90));
+
+                  std::vector<double> ray_dir_local(num_rays * 3);
+                  std::vector<double> ray_dir_global(num_rays * 3);
+                  for (int i = 0; i < num_rays; i++) {
+                      double theta = dist_theta(gen);
+                      double sin_phi = dist_sin_phi(gen);
+                      double cos_phi = std::sqrt(std::max(0.0, 1.0 - sin_phi * sin_phi));
+                      double lx = cos_phi * std::cos(theta);
+                      double ly = cos_phi * std::sin(theta);
+                      double lz = sin_phi;
+                      ray_dir_local[i * 3 + 0] = lx;
+                      ray_dir_local[i * 3 + 1] = ly;
+                      ray_dir_local[i * 3 + 2] = lz;
+                      // Transform to global frame
+                      mjtNum dl[3] = {lx, ly, lz};
+                      mjtNum dg[3];
+                      mju_mulMatVec3(dg, mat, dl);
+                      ray_dir_global[i * 3 + 0] = dg[0];
+                      ray_dir_global[i * 3 + 1] = dg[1];
+                      ray_dir_global[i * 3 + 2] = dg[2];
+                  }
+
+                  // Parallel raycasting - mj_ray is read-only and thread-safe
+                  std::vector<float> results(num_rays * 3);
+                  std::vector<int> valid(num_rays, 0);
+
+                  #pragma omp parallel for schedule(static) num_threads(4)
+                  for (int i = 0; i < num_rays; i++) {
+                      mjtNum dg[3] = {ray_dir_global[i*3], ray_dir_global[i*3+1], ray_dir_global[i*3+2]};
+                      int gid = -1;
+                      mjtNum hit_dist = mj_ray(m, d, pos, dg, nullptr, 1, body_id, &gid);
+                      if (hit_dist > 0.1 && hit_dist < 40.0) {
+                          results[i*3 + 0] = static_cast<float>(ray_dir_local[i*3 + 0] * hit_dist);
+                          results[i*3 + 1] = static_cast<float>(ray_dir_local[i*3 + 1] * hit_dist);
+                          results[i*3 + 2] = static_cast<float>(ray_dir_local[i*3 + 2] * hit_dist);
+                          valid[i] = 1;
+                      }
+                  }
+
+                  // Compact valid points and publish
+                  int valid_count = 0;
+                  for (int i = 0; i < num_rays; i++) {
+                      if (valid[i]) valid_count++;
+                  }
+
+                  sensor_msgs::msg::PointCloud2 pc_msg;
+                  pc_msg.header.stamp = ros_node->get_clock()->now();
+                  pc_msg.header.frame_id = frame_id;
+                  pc_msg.height = 1;
+                  pc_msg.width = valid_count;
+                  pc_msg.is_dense = true;
+                  pc_msg.is_bigendian = false;
+                  sensor_msgs::PointCloud2Modifier modifier(pc_msg);
+                  modifier.setPointCloud2FieldsByString(1, "xyz");
+                  modifier.resize(valid_count);
+                  sensor_msgs::PointCloud2Iterator<float> iter_x(pc_msg, "x");
+                  sensor_msgs::PointCloud2Iterator<float> iter_y(pc_msg, "y");
+                  sensor_msgs::PointCloud2Iterator<float> iter_z(pc_msg, "z");
+                  for (int i = 0; i < num_rays; i++) {
+                      if (valid[i]) {
+                          *iter_x = results[i*3 + 0];
+                          *iter_y = results[i*3 + 1];
+                          *iter_z = results[i*3 + 2];
+                          ++iter_x; ++iter_y; ++iter_z;
+                      }
+                  }
+                  pub->publish(pc_msg);
+              };
+              
+              publish_lidar(neck_site_id, "neck_lidar", neck_lidar_pub, 2000);
+              publish_lidar(head_site_id, "head_lidar", head_lidar_pub, 2000);
+          }
+
                 stepped = true;
 
                 // break if reset
@@ -650,6 +756,17 @@ void user_key_cb(GLFWwindow* window, int key, int scancode, int act, int mods) {
 // run event loop
 int main(int argc, char **argv)
 {
+
+  // Init ROS2
+  rclcpp::init(argc, argv);
+  ros_node = std::make_shared<rclcpp::Node>("unitree_mujoco_node");
+  neck_lidar_pub = ros_node->create_publisher<sensor_msgs::msg::PointCloud2>("/neck_lidar/points", 10);
+  head_lidar_pub = ros_node->create_publisher<sensor_msgs::msg::PointCloud2>("/head_lidar/points", 10);
+  
+  std::thread ros_thread([](){
+    rclcpp::spin(ros_node);
+  });
+
 
   // display an error if running on macOS under Rosetta 2
 #if defined(__APPLE__) && defined(__AVX__)

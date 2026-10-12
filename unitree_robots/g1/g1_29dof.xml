@@ -207,6 +207,17 @@
             mesh="waist_roll_link" />
           <site name="secondary_imu" size="0.01" pos="-0.03959 -0.00224 0.13792"/>
           <body name="torso_link" pos="0 0 0.019">
+            <!-- Neck Lidar -->
+            <body name="neck_lidar" pos="0.0 0.0 0.15">
+              <!-- <geom type="cylinder" size="0.03 0.02" rgba="0 0 0 1"/> -->
+              <site name="neck_lidar_site" pos="0 0 0" size="0.01"/>
+            </body>
+            <!-- Head Lidar -->
+            <body name="head_lidar" pos="0.0 0.0 0.35">
+              <!-- <geom type="cylinder" size="0.03 0.02" rgba="0 0 0 1"/> -->
+              <site name="head_lidar_site" pos="0 0 0" size="0.01"/>
+            </body>
+
             <inertial pos="0.00331658 0.000261533 0.179856"
               quat="0.999831 0.000376204 0.0179895 -0.00377704" mass="9.598"
               diaginertia="0.12407 0.111951 0.0325382" />

@@ -14,10 +14,26 @@
     <texture type="2d" name="groundplane" builtin="checker" mark="edge" rgb1="0.2 0.3 0.4" rgb2="0.1 0.2 0.3"
       markrgb="0.8 0.8 0.8" width="300" height="300"/>
     <material name="groundplane" texture="groundplane" texuniform="true" texrepeat="5 5" reflectance="0.2"/>
+    <material name="wall" rgba="0.5 0.5 0.6 1"/>
+    <material name="box" rgba="0.8 0.4 0.2 1"/>
   </asset>
 
   <worldbody>
     <light pos="0 0 1.5" dir="0 0 -1" directional="true"/>
     <geom name="floor" size="0 0 0.05" type="plane" material="groundplane"/>
+    
+    <!-- Factory / Room environment for SLAM -->
+    <!-- Outer Walls (10x10 meters room) -->
+    <geom name="wall_n" pos="5 0 1" size="0.2 5 1" type="box" material="wall"/>
+    <geom name="wall_s" pos="-5 0 1" size="0.2 5 1" type="box" material="wall"/>
+    <geom name="wall_e" pos="0 5 1" size="5 0.2 1" type="box" material="wall"/>
+    <geom name="wall_w" pos="0 -5 1" size="5 0.2 1" type="box" material="wall"/>
+    
+    <!-- Inner Obstacles -->
+    <geom name="obs_1" pos="2 2 0.5" size="0.5 0.5 0.5" type="box" material="box"/>
+    <geom name="obs_2" pos="-2 -2 0.75" size="0.5 0.5 0.75" type="box" material="box"/>
+    <geom name="obs_3" pos="2 -3 0.5" size="1.0 0.2 0.5" type="box" material="box"/>
+    <geom name="obs_4" pos="-3 2 0.5" size="0.2 1.0 0.5" type="box" material="box"/>
+    <geom name="obs_5" pos="0 3 0.5" size="0.5 0.5 0.5" type="box" material="box" euler="0 0 45"/>
   </worldbody>
 </mujoco>
