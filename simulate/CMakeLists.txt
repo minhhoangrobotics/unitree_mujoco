@@ -16,6 +16,7 @@ find_package(Boost REQUIRED COMPONENTS program_options)
 
 find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
+find_package(rcl_interfaces REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(tf2_ros REQUIRED)
 find_package(tf2_geometry_msgs REQUIRED)
@@ -57,7 +58,7 @@ link_libraries(
 
 
 add_executable(unitree_mujoco ${SIM_SRC} src/main.cc)
-ament_target_dependencies(unitree_mujoco rclcpp sensor_msgs tf2_ros tf2_geometry_msgs)
+ament_target_dependencies(unitree_mujoco rclcpp rcl_interfaces sensor_msgs tf2_ros tf2_geometry_msgs)
 target_link_libraries(unitree_mujoco OpenMP::OpenMP_CXX)
 
 

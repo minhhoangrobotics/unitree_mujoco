@@ -17,7 +17,11 @@
 #include "glfw_adapter.h"
 #undef private
 
+#include <algorithm>
 #include <chrono>
+#include <atomic>
+#include <condition_variable>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -28,6 +32,10 @@
 #include <new>
 #include <string>
 #include <thread>
+#include <vector>
+#if defined(__linux__)
+#include <unistd.h>
+#endif
 
 #include <mujoco/mujoco.h>
 #include "simulate.h"
@@ -35,6 +43,7 @@
 #include "unitree_sdk2_bridge.h"
 
 #include <rclcpp/rclcpp.hpp>
+#include <rcl_interfaces/msg/set_parameters_result.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
 #include <sensor_msgs/point_cloud2_iterator.hpp>
 #include <tf2/LinearMath/Quaternion.h>
@@ -44,6 +53,242 @@
 std::shared_ptr<rclcpp::Node> ros_node;
 rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr neck_lidar_pub;
 rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr head_lidar_pub;
+std::atomic<bool> show_factory_roof{true};
+std::atomic<int> lidar_ray_threads{2};
+std::atomic<int> head_lidar_rays{2000};
+std::atomic<int> neck_lidar_rays{2000};
+rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr sim_parameter_callback;
+
+void SetFactoryRoofVisibility(mjModel* model, bool visible) {
+  if (!model) return;
+  for (int i = 0; i < model->ngeom; ++i) {
+    const char* name = mj_id2name(model, mjOBJ_GEOM, i);
+    if (name && (std::strcmp(name, "roof") == 0 ||
+                 std::strncmp(name, "beam_", 5) == 0)) {
+      // Change only rendering. Collision and LiDAR raycasts keep the same scene.
+      model->geom_rgba[4 * i + 3] = visible ? 1.0f : 0.0f;
+    }
+  }
+}
+
+// Copy one physics state, then raycast and publish it on a separate worker.
+// The physics loop only pays for mj_copyData; it never waits for mj_ray or DDS.
+class LidarScanner {
+ public:
+  LidarScanner() { worker_ = std::thread([this] { Run(); }); }
+  ~LidarScanner() { Stop(); }
+
+  void Submit(mjModel* model, mjData* state, const rclcpp::Time& stamp) {
+    if ((!head_lidar_pub || head_lidar_pub->get_subscription_count() == 0) &&
+        (!neck_lidar_pub || neck_lidar_pub->get_subscription_count() == 0)) return;
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (busy_ || pending_) {
+      ++skipped_;
+      return;
+    }
+    if (snapshot_model_ != model) {
+      mj_deleteData(snapshot_);
+      snapshot_ = mj_makeData(model);
+      snapshot_model_ = model;
+    }
+    if (!snapshot_) return;
+    const auto copy_started = std::chrono::steady_clock::now();
+    mj_copyData(snapshot_, model, state);
+    const double copy_ms = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - copy_started).count();
+    copy_total_ms_ += copy_ms;
+    copy_max_ms_ = std::max(copy_max_ms_, copy_ms);
+    ++copy_count_;
+    stamp_ = stamp;
+    pending_ = true;
+    condition_.notify_one();
+  }
+
+  void WaitIdle() {
+    std::unique_lock<std::mutex> lock(mutex_);
+    condition_.wait(lock, [this] { return !busy_ && !pending_; });
+  }
+
+  void ResetModel() {
+    WaitIdle();
+    std::lock_guard<std::mutex> lock(mutex_);
+    mj_deleteData(snapshot_);
+    snapshot_ = nullptr;
+    snapshot_model_ = nullptr;
+  }
+
+  void Stop() {
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      if (stopped_) return;
+      stopped_ = true;
+      pending_ = false;
+    }
+    condition_.notify_all();
+    if (worker_.joinable()) worker_.join();
+    mj_deleteData(snapshot_);
+    snapshot_ = nullptr;
+  }
+
+ private:
+  void Run() {
+#if defined(__linux__)
+    // Leave the physics and policy threads runnable during a LiDAR scan.
+    ::nice(10);
+#endif
+    auto last_report = std::chrono::steady_clock::now();
+    double total_ms = 0.0;
+    double max_ms = 0.0;
+    int count = 0;
+    while (true) {
+      mjModel* model;
+      mjData* snapshot;
+      rclcpp::Time stamp;
+      {
+        std::unique_lock<std::mutex> lock(mutex_);
+        condition_.wait(lock, [this] { return stopped_ || pending_; });
+        if (stopped_) return;
+        model = snapshot_model_;
+        snapshot = snapshot_;
+        stamp = stamp_;
+        pending_ = false;
+        busy_ = true;
+      }
+      const auto started = std::chrono::steady_clock::now();
+      const int neck_id = mj_name2id(model, mjOBJ_SITE, "neck_lidar_site");
+      const int head_id = mj_name2id(model, mjOBJ_SITE, "head_lidar_site");
+      PublishScan(model, snapshot, stamp, neck_id, "neck_lidar",
+                  neck_lidar_pub, neck_lidar_rays.load());
+      PublishScan(model, snapshot, stamp, head_id, "head_lidar",
+                  head_lidar_pub, head_lidar_rays.load());
+      const double elapsed_ms = std::chrono::duration<double, std::milli>(
+          std::chrono::steady_clock::now() - started).count();
+      total_ms += elapsed_ms;
+      max_ms = std::max(max_ms, elapsed_ms);
+      ++count;
+      const auto now = std::chrono::steady_clock::now();
+      if (now - last_report >= std::chrono::seconds(10)) {
+        int skipped;
+        double copy_average_ms;
+        double copy_maximum_ms;
+        {
+          std::lock_guard<std::mutex> lock(mutex_);
+          skipped = skipped_;
+          skipped_ = 0;
+          copy_average_ms = copy_count_ ? copy_total_ms_ / copy_count_ : 0.0;
+          copy_maximum_ms = copy_max_ms_;
+          copy_total_ms_ = 0.0;
+          copy_max_ms_ = 0.0;
+          copy_count_ = 0;
+        }
+        RCLCPP_INFO(ros_node->get_logger(),
+                    "LiDAR copy avg %.2f ms, max %.2f ms; worker avg %.1f ms, max %.1f ms, scans %d, skipped %d "
+                    "(threads=%d, head=%d, neck=%d)",
+                    copy_average_ms, copy_maximum_ms, total_ms / count, max_ms, count, skipped,
+                    lidar_ray_threads.load(), head_lidar_rays.load(), neck_lidar_rays.load());
+        total_ms = 0.0;
+        max_ms = 0.0;
+        count = 0;
+        last_report = now;
+      }
+      {
+        std::lock_guard<std::mutex> lock(mutex_);
+        busy_ = false;
+      }
+      condition_.notify_all();
+    }
+  }
+
+  static void PublishScan(mjModel* model, mjData* snapshot, const rclcpp::Time& stamp,
+                          int site_id, const std::string& frame_id,
+                          const rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr& pub,
+                          int num_rays) {
+    if (site_id < 0 || !pub || pub->get_subscription_count() == 0) return;
+    mjtNum pos[3];
+    mjtNum mat[9];
+    mju_copy3(pos, snapshot->site_xpos + 3 * site_id);
+    mju_copy(mat, snapshot->site_xmat + 9 * site_id, 9);
+    const int body_id = model->site_bodyid[site_id];
+
+    static std::mt19937 gen(std::random_device{}());
+    std::uniform_real_distribution<double> dist_theta(-3.1415926535, 3.1415926535);
+    std::uniform_real_distribution<double> dist_sin_phi(std::sin(-0.26), std::sin(0.90));
+    std::vector<double> ray_dir_local(num_rays * 3);
+    std::vector<double> ray_dir_global(num_rays * 3);
+    for (int i = 0; i < num_rays; ++i) {
+      const double theta = dist_theta(gen);
+      const double sin_phi = dist_sin_phi(gen);
+      const double cos_phi = std::sqrt(std::max(0.0, 1.0 - sin_phi * sin_phi));
+      const double lx = cos_phi * std::cos(theta);
+      const double ly = cos_phi * std::sin(theta);
+      const double lz = sin_phi;
+      ray_dir_local[i * 3 + 0] = lx;
+      ray_dir_local[i * 3 + 1] = ly;
+      ray_dir_local[i * 3 + 2] = lz;
+      mjtNum local[3] = {lx, ly, lz};
+      mjtNum global[3];
+      mju_mulMatVec3(global, mat, local);
+      ray_dir_global[i * 3 + 0] = global[0];
+      ray_dir_global[i * 3 + 1] = global[1];
+      ray_dir_global[i * 3 + 2] = global[2];
+    }
+
+    std::vector<float> points(num_rays * 3);
+    std::vector<int> valid(num_rays, 0);
+    #pragma omp parallel for schedule(static) num_threads(lidar_ray_threads.load())
+    for (int i = 0; i < num_rays; ++i) {
+      mjtNum direction[3] = {ray_dir_global[i * 3], ray_dir_global[i * 3 + 1],
+                             ray_dir_global[i * 3 + 2]};
+      int geom_id = -1;
+      const mjtNum distance = mj_ray(model, snapshot, pos, direction, nullptr, 1,
+                                    body_id, &geom_id);
+      if (distance > 0.1 && distance < 40.0) {
+        points[i * 3 + 0] = static_cast<float>(ray_dir_local[i * 3 + 0] * distance);
+        points[i * 3 + 1] = static_cast<float>(ray_dir_local[i * 3 + 1] * distance);
+        points[i * 3 + 2] = static_cast<float>(ray_dir_local[i * 3 + 2] * distance);
+        valid[i] = 1;
+      }
+    }
+    int valid_count = 0;
+    for (int value : valid) valid_count += value;
+    sensor_msgs::msg::PointCloud2 cloud;
+    cloud.header.stamp = stamp;
+    cloud.header.frame_id = frame_id;
+    cloud.height = 1;
+    cloud.width = valid_count;
+    cloud.is_dense = true;
+    cloud.is_bigendian = false;
+    sensor_msgs::PointCloud2Modifier modifier(cloud);
+    modifier.setPointCloud2FieldsByString(1, "xyz");
+    modifier.resize(valid_count);
+    sensor_msgs::PointCloud2Iterator<float> x(cloud, "x");
+    sensor_msgs::PointCloud2Iterator<float> y(cloud, "y");
+    sensor_msgs::PointCloud2Iterator<float> z(cloud, "z");
+    for (int i = 0; i < num_rays; ++i) {
+      if (valid[i]) {
+        *x = points[i * 3 + 0];
+        *y = points[i * 3 + 1];
+        *z = points[i * 3 + 2];
+        ++x; ++y; ++z;
+      }
+    }
+    pub->publish(cloud);
+  }
+
+  std::mutex mutex_;
+  std::condition_variable condition_;
+  std::thread worker_;
+  mjModel* snapshot_model_ = nullptr;
+  mjData* snapshot_ = nullptr;
+  rclcpp::Time stamp_{0, 0, RCL_SYSTEM_TIME};
+  bool pending_ = false;
+  bool busy_ = false;
+  bool stopped_ = false;
+  int skipped_ = 0;
+  double copy_total_ms_ = 0.0;
+  double copy_max_ms_ = 0.0;
+  int copy_count_ = 0;
+};
 
 #include "param.h"
 
@@ -332,12 +577,14 @@ namespace
       sim.run = 0;
     }
 
+    SetFactoryRoofVisibility(mnew, show_factory_roof.load());
     return mnew;
   }
 
   // simulate in background thread (while rendering in main thread)
   void PhysicsLoop(mj::Simulate &sim)
   {
+    LidarScanner scanner;
     // cpu-sim syncronization point
     std::chrono::time_point<mj::Simulate::Clock> syncCPU;
     mjtNum syncSim = 0;
@@ -361,6 +608,7 @@ namespace
         {
           sim.Load(mnew, dnew, sim.dropfilename);
 
+          scanner.ResetModel();
           mj_deleteData(d);
           mj_deleteModel(m);
 
@@ -391,6 +639,7 @@ namespace
         {
           sim.Load(mnew, dnew, sim.filename);
 
+          scanner.ResetModel();
           mj_deleteData(d);
           mj_deleteModel(m);
 
@@ -423,6 +672,13 @@ namespace
       {
         // lock the sim mutex
         const std::unique_lock<std::recursive_mutex> lock(sim.mtx);
+        static bool applied_roof_visibility = show_factory_roof.load();
+        const bool requested_roof_visibility = show_factory_roof.load();
+        if (requested_roof_visibility != applied_roof_visibility) {
+          scanner.WaitIdle();
+          SetFactoryRoofVisibility(m, requested_roof_visibility);
+          applied_roof_visibility = requested_roof_visibility;
+        }
 
         // run only if model is present
         if (m)
@@ -529,106 +785,13 @@ namespace
             // save current state to history buffer
             if (stepped)
             {
-              // Lidar scanning simulation at 10Hz
+              // Capture one consistent physics state every 0.1 simulated seconds.
+              // Raycasting and DDS publishing happen on LidarScanner's worker.
               static double last_lidar_time = 0;
-              // The scene can be reset while this process stays alive. Simulation
-              // time then jumps backwards, so restart the scan schedule as well.
-              if (d->time < last_lidar_time) {
-                  last_lidar_time = d->time - 0.1;
-              }
+              if (d->time < last_lidar_time) last_lidar_time = d->time - 0.1;
               if (d->time - last_lidar_time >= 0.1 && ros_node) {
-                  last_lidar_time = d->time;
-                  // Both LiDARs raycast against this one MuJoCo state. Stamp
-                  // acquisition before raycasting rather than after the CPU
-                  // work, which can lag the robot pose used for the points.
-                  const auto scan_stamp = ros_node->get_clock()->now();
-                  int neck_site_id = mj_name2id(m, mjOBJ_SITE, "neck_lidar_site");
-                  int head_site_id = mj_name2id(m, mjOBJ_SITE, "head_lidar_site");
-              
-                  auto publish_lidar = [&](int site_id, const std::string& frame_id, rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pub, int num_rays) {
-                      if (site_id < 0 || !pub || pub->get_subscription_count() == 0) return;
-
-                      mjtNum pos[3];
-                      mjtNum mat[9];
-                      mju_copy3(pos, d->site_xpos + 3 * site_id);
-                      mju_copy(mat, d->site_xmat + 9 * site_id, 9);
-                      int body_id = m->site_bodyid[site_id];
-
-                      // Pre-generate random directions sequentially (RNG is not thread-safe)
-                      static std::mt19937 gen(std::random_device{}());
-                      std::uniform_real_distribution<double> dist_theta(-3.1415926535, 3.1415926535);
-                      std::uniform_real_distribution<double> dist_sin_phi(std::sin(-0.26), std::sin(0.90));
-
-                      std::vector<double> ray_dir_local(num_rays * 3);
-                      std::vector<double> ray_dir_global(num_rays * 3);
-                      for (int i = 0; i < num_rays; i++) {
-                          double theta = dist_theta(gen);
-                          double sin_phi = dist_sin_phi(gen);
-                          double cos_phi = std::sqrt(std::max(0.0, 1.0 - sin_phi * sin_phi));
-                          double lx = cos_phi * std::cos(theta);
-                          double ly = cos_phi * std::sin(theta);
-                          double lz = sin_phi;
-                          ray_dir_local[i * 3 + 0] = lx;
-                          ray_dir_local[i * 3 + 1] = ly;
-                          ray_dir_local[i * 3 + 2] = lz;
-                          // Transform to global frame
-                          mjtNum dl[3] = {lx, ly, lz};
-                          mjtNum dg[3];
-                          mju_mulMatVec3(dg, mat, dl);
-                          ray_dir_global[i * 3 + 0] = dg[0];
-                          ray_dir_global[i * 3 + 1] = dg[1];
-                          ray_dir_global[i * 3 + 2] = dg[2];
-                      }
-
-                      // Parallel raycasting - mj_ray is read-only and thread-safe
-                      std::vector<float> results(num_rays * 3);
-                      std::vector<int> valid(num_rays, 0);
-
-                      #pragma omp parallel for schedule(static) num_threads(4)
-                      for (int i = 0; i < num_rays; i++) {
-                          mjtNum dg[3] = {ray_dir_global[i*3], ray_dir_global[i*3+1], ray_dir_global[i*3+2]};
-                          int gid = -1;
-                          mjtNum hit_dist = mj_ray(m, d, pos, dg, nullptr, 1, body_id, &gid);
-                          if (hit_dist > 0.1 && hit_dist < 40.0) {
-                              results[i*3 + 0] = static_cast<float>(ray_dir_local[i*3 + 0] * hit_dist);
-                              results[i*3 + 1] = static_cast<float>(ray_dir_local[i*3 + 1] * hit_dist);
-                              results[i*3 + 2] = static_cast<float>(ray_dir_local[i*3 + 2] * hit_dist);
-                              valid[i] = 1;
-                          }
-                      }
-
-                      // Compact valid points and publish
-                      int valid_count = 0;
-                      for (int i = 0; i < num_rays; i++) {
-                          if (valid[i]) valid_count++;
-                      }
-
-                      sensor_msgs::msg::PointCloud2 pc_msg;
-                      pc_msg.header.stamp = scan_stamp;
-                      pc_msg.header.frame_id = frame_id;
-                      pc_msg.height = 1;
-                      pc_msg.width = valid_count;
-                      pc_msg.is_dense = true;
-                      pc_msg.is_bigendian = false;
-                      sensor_msgs::PointCloud2Modifier modifier(pc_msg);
-                      modifier.setPointCloud2FieldsByString(1, "xyz");
-                      modifier.resize(valid_count);
-                      sensor_msgs::PointCloud2Iterator<float> iter_x(pc_msg, "x");
-                      sensor_msgs::PointCloud2Iterator<float> iter_y(pc_msg, "y");
-                      sensor_msgs::PointCloud2Iterator<float> iter_z(pc_msg, "z");
-                      for (int i = 0; i < num_rays; i++) {
-                          if (valid[i]) {
-                              *iter_x = results[i*3 + 0];
-                              *iter_y = results[i*3 + 1];
-                              *iter_z = results[i*3 + 2];
-                              ++iter_x; ++iter_y; ++iter_z;
-                          }
-                      }
-                      pub->publish(pc_msg);
-                  };
-              
-                  publish_lidar(neck_site_id, "neck_lidar", neck_lidar_pub, 2000);
-                  publish_lidar(head_site_id, "head_lidar", head_lidar_pub, 2000);
+                last_lidar_time = d->time;
+                scanner.Submit(m, d, ros_node->get_clock()->now());
               }
               sim.AddToHistory();
             }
@@ -768,6 +931,47 @@ int main(int argc, char **argv)
   // Init ROS2
   rclcpp::init(argc, argv);
   ros_node = std::make_shared<rclcpp::Node>("unitree_mujoco_node");
+  ros_node->declare_parameter<bool>("show_factory_roof", true);
+  ros_node->declare_parameter<int>("lidar_ray_threads", 2);
+  ros_node->declare_parameter<int>("head_lidar_rays", 2000);
+  ros_node->declare_parameter<int>("neck_lidar_rays", 2000);
+  sim_parameter_callback = ros_node->add_on_set_parameters_callback(
+      [](const std::vector<rclcpp::Parameter>& parameters) {
+        rcl_interfaces::msg::SetParametersResult result;
+        result.successful = true;
+        for (const auto& parameter : parameters) {
+          const auto& name = parameter.get_name();
+          if (name == "show_factory_roof") {
+            if (parameter.get_type() != rclcpp::ParameterType::PARAMETER_BOOL) {
+              result.successful = false;
+              result.reason = "show_factory_roof must be a boolean";
+            }
+          } else if (name == "lidar_ray_threads" || name == "head_lidar_rays" ||
+                     name == "neck_lidar_rays") {
+            if (parameter.get_type() != rclcpp::ParameterType::PARAMETER_INTEGER) {
+              result.successful = false;
+              result.reason = name + " must be an integer";
+            } else {
+              const auto value = parameter.as_int();
+              const bool valid = name == "lidar_ray_threads" ?
+                  value >= 1 && value <= 8 : value >= 100 && value <= 10000;
+              if (!valid) {
+                result.successful = false;
+                result.reason = name + " is outside its allowed range";
+              }
+            }
+          }
+          if (!result.successful) return result;
+        }
+        for (const auto& parameter : parameters) {
+          const auto& name = parameter.get_name();
+          if (name == "show_factory_roof") show_factory_roof.store(parameter.as_bool());
+          if (name == "lidar_ray_threads") lidar_ray_threads.store(parameter.as_int());
+          if (name == "head_lidar_rays") head_lidar_rays.store(parameter.as_int());
+          if (name == "neck_lidar_rays") neck_lidar_rays.store(parameter.as_int());
+        }
+        return result;
+      });
   neck_lidar_pub = ros_node->create_publisher<sensor_msgs::msg::PointCloud2>("/neck_lidar/points", 10);
   head_lidar_pub = ros_node->create_publisher<sensor_msgs::msg::PointCloud2>("/head_lidar/points", 10);
   
