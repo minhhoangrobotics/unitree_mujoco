@@ -186,8 +186,10 @@ public:
             }
         }
 
-        // lowstate
-        if(lowstate->trylock()) {
+        // Publish the current motor and IMU state on every 1 kHz bridge cycle.
+        // Gym's balance controller needs fresh state even between 50 Hz policy
+        // inferences; throttling this stream also throttles its ROS command loop.
+        if (lowstate->trylock()) {
             for(int i(0); i<num_motor_; i++) {
                 lowstate->msg_.motor_state()[i].q() = mj_data_->sensordata[i];
                 lowstate->msg_.motor_state()[i].dq() = mj_data_->sensordata[i + num_motor_];
@@ -225,8 +227,12 @@ public:
             lowstate->msg_.tick() = std::round(mj_data_->time / 1e-3);
             lowstate->unlockAndPublish();
         }
-        // highstate
-        if(highstate->trylock()) {
+        // SportModeState is position feedback and diagnostics, not the 1 kHz
+        // motor loop. Publishing it at 100 Hz avoids needless DDS/Python work.
+        if (mj_data_->time < last_highstate_publish_time_) {
+            last_highstate_publish_time_ = mj_data_->time - 0.01;
+        }
+        if (mj_data_->time - last_highstate_publish_time_ >= 0.01 && highstate->trylock()) {
             if(frame_pos_adr_ >= 0) {
                 highstate->msg_.position()[0] = mj_data_->sensordata[frame_pos_adr_ + 0];
                 highstate->msg_.position()[1] = mj_data_->sensordata[frame_pos_adr_ + 1];
@@ -238,6 +244,7 @@ public:
                 highstate->msg_.velocity()[2] = mj_data_->sensordata[frame_vel_adr_ + 2];
             }
             highstate->unlockAndPublish();
+            last_highstate_publish_time_ = mj_data_->time;
         }
         // wireless_controller
         if(wireless_controller->joystick) {
@@ -251,6 +258,7 @@ public:
     std::unique_ptr<LowState_t> lowstate;
     
 private:
+    double last_highstate_publish_time_ = -1.0;
     unitree::common::RecurrentThreadPtr thread_;
 };
 

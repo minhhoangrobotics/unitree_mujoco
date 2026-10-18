@@ -47,15 +47,14 @@
 #include <sensor_msgs/msg/point_cloud2.hpp>
 #include <sensor_msgs/point_cloud2_iterator.hpp>
 #include <tf2/LinearMath/Quaternion.h>
-#include <random>
 #include <omp.h>
 
 std::shared_ptr<rclcpp::Node> ros_node;
 rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr neck_lidar_pub;
 rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr head_lidar_pub;
 std::atomic<bool> show_factory_roof{true};
-std::atomic<int> lidar_ray_threads{2};
-std::atomic<int> head_lidar_rays{2000};
+std::atomic<int> lidar_ray_threads{1};
+std::atomic<int> head_lidar_rays{1200};
 std::atomic<int> neck_lidar_rays{2000};
 rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr sim_parameter_callback;
 
@@ -210,14 +209,19 @@ class LidarScanner {
     mju_copy(mat, snapshot->site_xmat + 9 * site_id, 9);
     const int body_id = model->site_bodyid[site_id];
 
-    static std::mt19937 gen(std::random_device{}());
-    std::uniform_real_distribution<double> dist_theta(-3.1415926535, 3.1415926535);
-    std::uniform_real_distribution<double> dist_sin_phi(std::sin(-0.26), std::sin(0.90));
+    // Fixed low-discrepancy directions model repeatable LiDAR beams. Re-randomizing
+    // all rays on every scan made the same wall look different to scan matching.
+    constexpr double kGoldenFraction = 0.6180339887498949;
+    constexpr double kPi = 3.14159265358979323846;
+    const double low_sin = std::sin(-0.26);
+    const double high_sin = std::sin(0.90);
     std::vector<double> ray_dir_local(num_rays * 3);
     std::vector<double> ray_dir_global(num_rays * 3);
     for (int i = 0; i < num_rays; ++i) {
-      const double theta = dist_theta(gen);
-      const double sin_phi = dist_sin_phi(gen);
+      const double turn = std::fmod((i + 0.5) * kGoldenFraction, 1.0);
+      const double theta = -kPi + 2.0 * kPi * turn;
+      const double sin_phi = low_sin + (high_sin - low_sin) *
+          (i + 0.5) / static_cast<double>(num_rays);
       const double cos_phi = std::sqrt(std::max(0.0, 1.0 - sin_phi * sin_phi));
       const double lx = cos_phi * std::cos(theta);
       const double ly = cos_phi * std::sin(theta);
@@ -789,9 +793,16 @@ namespace
               // Raycasting and DDS publishing happen on LidarScanner's worker.
               static double last_lidar_time = 0;
               if (d->time < last_lidar_time) last_lidar_time = d->time - 0.1;
-              if (d->time - last_lidar_time >= 0.1 && ros_node) {
+              const bool lidar_requested =
+                  (head_lidar_pub && head_lidar_pub->get_subscription_count() > 0) ||
+                  (neck_lidar_pub && neck_lidar_pub->get_subscription_count() > 0);
+              if (d->time - last_lidar_time >= 0.1 && ros_node && lidar_requested) {
                 last_lidar_time = d->time;
                 scanner.Submit(m, d, ros_node->get_clock()->now());
+              } else if (!lidar_requested) {
+                // No mapper or navigation consumer: avoid copying the entire
+                // MuJoCo state into the LiDAR worker during control-only runs.
+                last_lidar_time = d->time;
               }
               sim.AddToHistory();
             }
@@ -932,8 +943,8 @@ int main(int argc, char **argv)
   rclcpp::init(argc, argv);
   ros_node = std::make_shared<rclcpp::Node>("unitree_mujoco_node");
   ros_node->declare_parameter<bool>("show_factory_roof", true);
-  ros_node->declare_parameter<int>("lidar_ray_threads", 2);
-  ros_node->declare_parameter<int>("head_lidar_rays", 2000);
+  ros_node->declare_parameter<int>("lidar_ray_threads", 1);
+  ros_node->declare_parameter<int>("head_lidar_rays", 1200);
   ros_node->declare_parameter<int>("neck_lidar_rays", 2000);
   sim_parameter_callback = ros_node->add_on_set_parameters_callback(
       [](const std::vector<rclcpp::Parameter>& parameters) {
