@@ -60,6 +60,10 @@ inline struct SimulationConfig
 
     int enable_elastic_band;
     int band_attached_link = 0;
+    int lidar_ray_threads = 1;
+    int head_lidar_rays = 1200;
+    int neck_lidar_rays = 800;
+    int waist_lidar_rays = 600;
 
     void load_from_yaml(const std::string &filename)
     {
@@ -80,6 +84,21 @@ inline struct SimulationConfig
             joystick_bits = cfg["joystick_bits"].as<int>();
             print_scene_information = cfg["print_scene_information"].as<int>();
             enable_elastic_band = cfg["enable_elastic_band"].as<int>();
+            if (cfg["lidar"])
+            {
+                const auto lidar = cfg["lidar"];
+                if (lidar["ray_threads"]) lidar_ray_threads = lidar["ray_threads"].as<int>();
+                if (lidar["head_rays"]) head_lidar_rays = lidar["head_rays"].as<int>();
+                if (lidar["neck_rays"]) neck_lidar_rays = lidar["neck_rays"].as<int>();
+                if (lidar["waist_rays"]) waist_lidar_rays = lidar["waist_rays"].as<int>();
+                if (lidar_ray_threads < 1 || lidar_ray_threads > 8 ||
+                    head_lidar_rays < 100 || head_lidar_rays > 10000 ||
+                    neck_lidar_rays < 100 || neck_lidar_rays > 10000 ||
+                    waist_lidar_rays < 100 || waist_lidar_rays > 10000)
+                {
+                    throw std::invalid_argument("Invalid lidar ray count or thread count in config.yaml");
+                }
+            }
         }
         catch(const std::exception& e)
         {

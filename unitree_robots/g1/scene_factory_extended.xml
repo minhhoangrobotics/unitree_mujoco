@@ -1,0 +1,203 @@
+<mujoco model="g1_29dof extended factory scene">
+  <include file="g1_29dof.xml"/>
+
+  <statistic center="4 4 1.5" extent="14.0"/>
+
+  <visual>
+    <headlight diffuse="0.7 0.7 0.7" ambient="0.4 0.4 0.4" specular="0.1 0.1 0.1"/>
+    <rgba haze="0.15 0.25 0.35 1"/>
+    <global azimuth="-135" elevation="-25"/>
+  </visual>
+
+  <asset>
+    <texture type="skybox" builtin="gradient" rgb1="0.3 0.5 0.7" rgb2="0 0 0" width="512" height="3072"/>
+    <texture type="2d" name="groundplane" builtin="checker" mark="edge" rgb1="0.3 0.32 0.35" rgb2="0.25 0.27 0.3"
+      markrgb="0.8 0.8 0.8" width="300" height="300"/>
+    <material name="groundplane" texture="groundplane" texuniform="true" texrepeat="10 10" reflectance="0.1"/>
+    <material name="wall" rgba="0.65 0.65 0.70 1"/>
+    <material name="roof" rgba="0.40 0.42 0.45 1"/>
+    <material name="beam" rgba="0.30 0.35 0.42 1"/>
+    <material name="pillar" rgba="0.75 0.75 0.78 1"/>
+    <material name="rack" rgba="0.85 0.40 0.10 1"/>
+    <material name="shelf" rgba="0.70 0.72 0.75 1"/>
+    <material name="crate" rgba="0.72 0.52 0.32 1"/>
+    <material name="barrel" rgba="0.20 0.45 0.35 1"/>
+    <material name="machine" rgba="0.25 0.40 0.50 1"/>
+    <material name="barrier" rgba="0.95 0.80 0.10 1"/>
+    <material name="forklift" rgba="0.95 0.42 0.04 1"/>
+    <material name="tire" rgba="0.07 0.08 0.09 1"/>
+    <material name="cabinet_blue" rgba="0.20 0.34 0.62 1"/>
+    <material name="conveyor" rgba="0.18 0.20 0.24 1"/>
+  </asset>
+
+  <worldbody>
+    <light pos="0 0 3.2" dir="0 0 -1" directional="true" diffuse="0.8 0.8 0.8"/>
+    <light pos="6 6 3.2" dir="0 0 -1" directional="false" diffuse="0.5 0.5 0.5"/>
+    <light pos="-6 -6 3.2" dir="0 0 -1" directional="false" diffuse="0.5 0.5 0.5"/>
+    
+    <!-- Retain the original factory contents; extend its footprint north and east. -->
+    <geom name="floor" size="20 20 0.05" type="plane" material="groundplane"/>
+
+    <!-- ==================== ROOF & CEILING ==================== -->
+    <geom name="roof" pos="0 0 3.5" size="10 10 0.05" type="box" material="roof"/>
+    <geom name="roof_north" pos="-3 14 3.5" size="7 4 0.05" type="box" material="roof"/>
+    <geom name="roof_connector" pos="7 12 3.5" size="3 2 0.05" type="box" material="roof"/>
+    <geom name="roof_east_mid" pos="12.5 8 3.5" size="2.5 6 0.05" type="box" material="roof"/>
+    <geom name="roof_east_south" pos="14 -4 3.5" size="4 6 0.05" type="box" material="roof"/>
+
+    <!-- Ceiling Structural Beams (I-Beams / Trusses) -->
+    <geom name="beam_x1" pos="0 -6 3.4" size="10 0.12 0.1" type="box" material="beam"/>
+    <geom name="beam_x2" pos="0 -2 3.4" size="10 0.12 0.1" type="box" material="beam"/>
+    <geom name="beam_x3" pos="0 2 3.4" size="10 0.12 0.1" type="box" material="beam"/>
+    <geom name="beam_x4" pos="0 6 3.4" size="10 0.12 0.1" type="box" material="beam"/>
+
+    <geom name="beam_y1" pos="-6 0 3.4" size="0.12 10 0.1" type="box" material="beam"/>
+    <geom name="beam_y2" pos="-2 0 3.4" size="0.12 10 0.1" type="box" material="beam"/>
+    <geom name="beam_y3" pos="2 0 3.4" size="0.12 10 0.1" type="box" material="beam"/>
+    <geom name="beam_y4" pos="6 0 3.4" size="0.12 10 0.1" type="box" material="beam"/>
+    <geom name="beam_north_x" pos="-3 14 3.4" size="7 0.12 0.1" type="box" material="beam"/>
+    <geom name="beam_north_y" pos="0 14 3.4" size="0.12 4 0.1" type="box" material="beam"/>
+    <geom name="beam_east_x" pos="14 -4 3.4" size="4 0.12 0.1" type="box" material="beam"/>
+    <geom name="beam_east_y" pos="14 -4 3.4" size="0.12 6 0.1" type="box" material="beam"/>
+    <geom name="beam_corridor_y" pos="12.5 8 3.4" size="0.12 6 0.1" type="box" material="beam"/>
+
+    <!-- ==================== OUTER ENCLOSURE WALLS ==================== -->
+    <!-- Stepped, non-square enclosure: 28 m south wall, 28 m west wall. -->
+    <geom name="wall_s" pos="4 -10 1.75" size="14 0.15 1.75" type="box" material="wall"/>
+    <geom name="wall_w" pos="-10 4 1.75" size="0.15 14 1.75" type="box" material="wall"/>
+    <geom name="wall_n" pos="-3 18 1.75" size="7 0.15 1.75" type="box" material="wall"/>
+    <geom name="wall_n_step" pos="4 16 1.75" size="0.15 2 1.75" type="box" material="wall"/>
+    <geom name="wall_n_mid" pos="9.5 14 1.75" size="5.5 0.15 1.75" type="box" material="wall"/>
+    <geom name="wall_e_mid" pos="15 8 1.75" size="0.15 6 1.75" type="box" material="wall"/>
+    <geom name="wall_e_step" pos="16.5 2 1.75" size="1.5 0.15 1.75" type="box" material="wall"/>
+    <geom name="wall_e" pos="18 -4 1.75" size="0.15 6 1.75" type="box" material="wall"/>
+
+    <!-- ==================== STRUCTURAL COLUMNS (PILLARS) ==================== -->
+    <geom name="col_ne" pos="5 5 1.75" size="0.25 1.75" type="cylinder" material="pillar"/>
+    <geom name="col_nw" pos="-5 5 1.75" size="0.25 1.75" type="cylinder" material="pillar"/>
+    <geom name="col_se" pos="5 -5 1.75" size="0.25 1.75" type="cylinder" material="pillar"/>
+    <geom name="col_sw" pos="-5 -5 1.75" size="0.25 1.75" type="cylinder" material="pillar"/>
+
+    <!-- ==================== OFFICE / CONTROL ROOM PARTITIONS ==================== -->
+    <!-- Enclosed room in Northwest corner: (-10 to -4, 4 to 10) -->
+    <geom name="part_s" pos="-7 4 1.5" size="3 0.1 1.5" type="box" material="wall"/>
+    <!-- East wall of office with doorway gap: wall section 1 -->
+    <geom name="part_e1" pos="-4 5.5 1.5" size="0.1 1.5 1.5" type="box" material="wall"/>
+    <!-- East wall section 2 above door -->
+    <geom name="part_e_lintel" pos="-4 8 2.5" size="0.1 1.0 0.5" type="box" material="wall"/>
+    <geom name="part_e2" pos="-4 9.5 1.5" size="0.1 0.5 1.5" type="box" material="wall"/>
+
+    <!-- Office Desk & Cabinets -->
+    <geom name="desk_1" pos="-7 7 0.4" size="1.2 0.6 0.4" type="box" material="crate"/>
+    <geom name="cabinet_1" pos="-9.2 7 0.8" size="0.4 1.2 0.8" type="box" material="shelf"/>
+
+    <!-- ==================== WAREHOUSE STORAGE RACK ROW 1 (y = -3) ==================== -->
+    <!-- Heavy Industrial Shelving Frame -->
+    <geom name="rack1_shelf_bot" pos="2 -3 0.4" size="3.5 0.6 0.05" type="box" material="shelf"/>
+    <geom name="rack1_shelf_mid" pos="2 -3 1.2" size="3.5 0.6 0.05" type="box" material="shelf"/>
+    <geom name="rack1_shelf_top" pos="2 -3 2.0" size="3.5 0.6 0.05" type="box" material="shelf"/>
+    <geom name="rack1_post1" pos="-1.4 -3 1.2" size="0.08 0.08 1.2" type="box" material="rack"/>
+    <geom name="rack1_post2" pos="0.3 -3 1.2" size="0.08 0.08 1.2" type="box" material="rack"/>
+    <geom name="rack1_post3" pos="2.0 -3 1.2" size="0.08 0.08 1.2" type="box" material="rack"/>
+    <geom name="rack1_post4" pos="3.7 -3 1.2" size="0.08 0.08 1.2" type="box" material="rack"/>
+    <geom name="rack1_post5" pos="5.4 -3 1.2" size="0.08 0.08 1.2" type="box" material="rack"/>
+
+    <!-- Pallets & Crates on Rack 1 -->
+    <geom name="crate_1a" pos="-0.5 -3 0.75" size="0.5 0.5 0.3" type="box" material="crate"/>
+    <geom name="crate_1b" pos="1.2 -3 0.7" size="0.4 0.4 0.25" type="box" material="crate"/>
+    <geom name="crate_1c" pos="2.8 -3 0.8" size="0.5 0.45 0.35" type="box" material="crate"/>
+    <geom name="crate_1d" pos="4.5 -3 0.7" size="0.4 0.4 0.25" type="box" material="crate"/>
+    <geom name="crate_1e" pos="0.3 -3 1.55" size="0.4 0.4 0.3" type="box" material="crate"/>
+    <geom name="crate_1f" pos="2.2 -3 1.5" size="0.5 0.4 0.25" type="box" material="crate"/>
+
+    <!-- ==================== WAREHOUSE STORAGE RACK ROW 2 (y = -7) ==================== -->
+    <geom name="rack2_shelf_bot" pos="2 -7 0.4" size="3.5 0.6 0.05" type="box" material="shelf"/>
+    <geom name="rack2_shelf_mid" pos="2 -7 1.2" size="3.5 0.6 0.05" type="box" material="shelf"/>
+    <geom name="rack2_shelf_top" pos="2 -7 2.0" size="3.5 0.6 0.05" type="box" material="shelf"/>
+    <geom name="rack2_post1" pos="-1.4 -7 1.2" size="0.08 0.08 1.2" type="box" material="rack"/>
+    <geom name="rack2_post2" pos="2.0 -7 1.2" size="0.08 0.08 1.2" type="box" material="rack"/>
+    <geom name="rack2_post3" pos="5.4 -7 1.2" size="0.08 0.08 1.2" type="box" material="rack"/>
+
+    <!-- Industrial Metal Drums / Barrels on Rack 2 -->
+    <geom name="barrel_1" pos="-0.6 -7 0.85" size="0.25 0.4" type="cylinder" material="barrel"/>
+    <geom name="barrel_2" pos="0.0 -7 0.85" size="0.25 0.4" type="cylinder" material="barrel"/>
+    <geom name="barrel_3" pos="0.6 -7 0.85" size="0.25 0.4" type="cylinder" material="barrel"/>
+    <geom name="crate_2a" pos="3.2 -7 0.75" size="0.6 0.5 0.3" type="box" material="crate"/>
+    <geom name="crate_2b" pos="4.6 -7 0.7" size="0.4 0.4 0.25" type="box" material="crate"/>
+
+    <!-- ==================== MACHINING WORKSHOP ZONE (Northeast) ==================== -->
+    <!-- Heavy CNC Machine Base & Enclosure -->
+    <geom name="cnc_base" pos="5 3 0.6" size="1.2 0.9 0.6" type="box" material="machine"/>
+    <geom name="cnc_top" pos="5 3 1.5" size="1.0 0.8 0.3" type="box" material="shelf"/>
+    <geom name="cnc_panel" pos="3.7 3 1.2" size="0.1 0.3 0.4" type="box" material="barrier"/>
+
+    <!-- Assembly Workbench -->
+    <geom name="workbench" pos="5 7 0.45" size="1.2 0.7 0.45" type="box" material="shelf"/>
+    <geom name="tool_chest" pos="3.5 7 0.5" size="0.3 0.6 0.5" type="box" material="rack"/>
+
+    <!-- Machine Perimeter Safety Barriers -->
+    <geom name="barrier_1" pos="2.5 3 0.45" size="0.05 1.5 0.45" type="box" material="barrier"/>
+    <geom name="barrier_2" pos="2.5 7 0.45" size="0.05 1.5 0.45" type="box" material="barrier"/>
+
+    <!-- ==================== PALLET STACKS & FREESTANDING OBSTACLES ==================== -->
+    <!-- Pallet Stack in Central Aisle -->
+    <geom name="pallet_base1" pos="-2 -2 0.1" size="0.6 0.5 0.1" type="box" material="crate"/>
+    <geom name="pallet_crate1" pos="-2 -2 0.5" size="0.55 0.45 0.3" type="box" material="crate" euler="0 0 15"/>
+    <geom name="pallet_crate2" pos="-2 -2 1.0" size="0.45 0.4 0.2" type="box" material="crate" euler="0 0 -10"/>
+
+    <!-- Staged Materials near West Wall -->
+    <geom name="pallet_base2" pos="-7 -2 0.1" size="0.7 0.6 0.1" type="box" material="crate"/>
+    <geom name="pallet_barrel1" pos="-7 -2.3 0.6" size="0.25 0.4" type="cylinder" material="barrel"/>
+    <geom name="pallet_barrel2" pos="-7 -1.7 0.6" size="0.25 0.4" type="cylinder" material="barrel"/>
+
+    <!-- Equipment crate in open floor -->
+    <geom name="free_crate1" pos="0 3.5 0.4" size="0.6 0.6 0.4" type="box" material="crate" euler="0 0 30"/>
+    <geom name="free_crate2" pos="-1.5 1.5 0.3" size="0.4 0.4 0.3" type="box" material="crate" euler="0 0 -20"/>
+
+    <!-- North extension: asymmetric cabinets, tanks and inspection equipment. -->
+    <geom name="north_cabinet_1" pos="-8.7 14.2 0.95" size="0.55 0.85 0.95" type="box" material="cabinet_blue"/>
+    <geom name="north_cabinet_2" pos="-8.7 16.3 0.70" size="0.55 0.55 0.70" type="box" material="shelf"/>
+    <geom name="north_cabinet_3" pos="-5.8 16.8 1.10" size="0.75 0.45 1.10" type="box" material="cabinet_blue"/>
+    <geom name="north_inspection_table" pos="-4.1 12.5 0.50" size="1.0 0.55 0.50" type="box" material="shelf" euler="0 0 18"/>
+    <geom name="north_control_panel" pos="-4.1 12.5 1.22" size="0.62 0.12 0.26" type="box" material="machine" euler="0 0 18"/>
+    <geom name="north_tank_1" pos="0.0 15.8 0.90" size="0.46 0.90" type="cylinder" material="barrel"/>
+    <geom name="north_tank_2" pos="1.5 15.8 0.65" size="0.32 0.65" type="cylinder" material="machine"/>
+    <geom name="north_pipe" pos="0.75 15.8 1.85" size="0.10 0.85" type="capsule" material="barrier" euler="0 90 0"/>
+    <geom name="north_low_crate" pos="-1.2 12.4 0.18" size="0.70 0.50 0.18" type="box" material="crate"/>
+    <geom name="north_pillar" pos="3.2 15.1 1.75" size="0.22 1.75" type="cylinder" material="pillar"/>
+
+    <!-- Middle east extension: machine line and narrow, but walkable, aisles. -->
+    <geom name="east_cnc_base" pos="12.8 10.7 0.65" size="0.85 1.10 0.65" type="box" material="machine"/>
+    <geom name="east_cnc_top" pos="12.8 10.7 1.55" size="0.72 0.87 0.25" type="box" material="cabinet_blue"/>
+    <geom name="east_cnc_panel" pos="11.85 10.7 1.2" size="0.12 0.28 0.35" type="box" material="barrier"/>
+    <geom name="east_conveyor_belt" pos="13.0 5.0 0.78" size="0.72 2.05 0.12" type="box" material="conveyor"/>
+    <geom name="east_conveyor_leg_1" pos="12.6 3.4 0.38" size="0.10 0.10 0.38" type="box" material="shelf"/>
+    <geom name="east_conveyor_leg_2" pos="13.4 6.6 0.38" size="0.10 0.10 0.38" type="box" material="shelf"/>
+    <geom name="east_conveyor_load" pos="13.0 4.5 1.00" size="0.40 0.35 0.16" type="box" material="crate"/>
+    <geom name="east_barrier_1" pos="10.8 8.2 0.43" size="0.06 0.85 0.43" type="box" material="barrier"/>
+    <geom name="east_low_pallet" pos="10.9 11.8 0.11" size="0.55 0.45 0.11" type="box" material="crate"/>
+
+    <!-- Southern extension: parked forklift with distinct cabin, mast, tines and wheels. -->
+    <geom name="forklift_chassis" pos="14.3 -6.4 0.48" size="0.95 0.57 0.38" type="box" material="forklift"/>
+    <geom name="forklift_counterweight" pos="13.5 -6.4 0.70" size="0.32 0.54 0.44" type="box" material="forklift"/>
+    <geom name="forklift_cabin_left" pos="14.1 -5.9 1.36" size="0.08 0.07 0.64" type="box" material="tire"/>
+    <geom name="forklift_cabin_right" pos="14.1 -6.9 1.36" size="0.08 0.07 0.64" type="box" material="tire"/>
+    <geom name="forklift_guard" pos="14.0 -6.4 2.00" size="0.72 0.58 0.08" type="box" material="tire"/>
+    <geom name="forklift_mast_left" pos="15.3 -6.1 1.03" size="0.09 0.09 1.03" type="box" material="tire"/>
+    <geom name="forklift_mast_right" pos="15.3 -6.7 1.03" size="0.09 0.09 1.03" type="box" material="tire"/>
+    <geom name="forklift_crossbar" pos="15.3 -6.4 0.72" size="0.12 0.42 0.10" type="box" material="tire"/>
+    <geom name="forklift_fork_left" pos="16.1 -6.1 0.14" size="0.85 0.08 0.08" type="box" material="shelf"/>
+    <geom name="forklift_fork_right" pos="16.1 -6.7 0.14" size="0.85 0.08 0.08" type="box" material="shelf"/>
+    <geom name="forklift_front_wheel_l" pos="14.9 -5.8 0.27" size="0.28 0.12" type="cylinder" material="tire" euler="90 0 0"/>
+    <geom name="forklift_front_wheel_r" pos="14.9 -7.0 0.27" size="0.28 0.12" type="cylinder" material="tire" euler="90 0 0"/>
+    <geom name="forklift_rear_wheel_l" pos="13.5 -5.8 0.23" size="0.23 0.10" type="cylinder" material="tire" euler="90 0 0"/>
+    <geom name="forklift_rear_wheel_r" pos="13.5 -7.0 0.23" size="0.23 0.10" type="cylinder" material="tire" euler="90 0 0"/>
+
+    <geom name="east_pallet_stack" pos="11.7 -5.8 0.42" size="0.72 0.65 0.42" type="box" material="crate" euler="0 0 -12"/>
+    <geom name="east_tall_cabinet" pos="16.8 -1.0 1.05" size="0.48 0.75 1.05" type="box" material="cabinet_blue"/>
+    <geom name="east_barrel_pair_1" pos="11.9 -8.5 0.45" size="0.30 0.45" type="cylinder" material="barrel"/>
+    <geom name="east_barrel_pair_2" pos="12.7 -8.5 0.45" size="0.30 0.45" type="cylinder" material="barrel"/>
+    <geom name="east_tool_cart" pos="16.9 0.6 0.48" size="0.45 0.65 0.48" type="box" material="machine"/>
+
+  </worldbody>
+</mujoco>

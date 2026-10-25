@@ -65,6 +65,7 @@ void SetFactoryRoofVisibility(mjModel* model, bool visible) {
   for (int i = 0; i < model->ngeom; ++i) {
     const char* name = mj_id2name(model, mjOBJ_GEOM, i);
     if (name && (std::strcmp(name, "roof") == 0 ||
+                 std::strncmp(name, "roof_", 5) == 0 ||
                  std::strncmp(name, "beam_", 5) == 0)) {
       // Change only rendering. Collision and LiDAR raycasts keep the same scene.
       model->geom_rgba[4 * i + 3] = visible ? 1.0f : 0.0f;
@@ -1076,6 +1077,15 @@ int main(int argc, char **argv)
   // Load simulation configuration
   std::filesystem::path proj_dir = std::filesystem::path(getExecutableDir()).parent_path();
   param::config.load_from_yaml(proj_dir / "config.yaml");
+  // ROS parameters remain live-tunable; the YAML supplies their startup values.
+  const auto lidar_results = ros_node->set_parameters({
+      rclcpp::Parameter("lidar_ray_threads", param::config.lidar_ray_threads),
+      rclcpp::Parameter("head_lidar_rays", param::config.head_lidar_rays),
+      rclcpp::Parameter("neck_lidar_rays", param::config.neck_lidar_rays),
+      rclcpp::Parameter("waist_lidar_rays", param::config.waist_lidar_rays)});
+  for (const auto& result : lidar_results) {
+    if (!result.successful) mju_error("Invalid LiDAR parameter from config.yaml: %s", result.reason.c_str());
+  }
   param::helper(argc, argv);
   if(param::config.robot_scene.is_relative()) {
     param::config.robot_scene = proj_dir.parent_path() / "unitree_robots" / param::config.robot / param::config.robot_scene;

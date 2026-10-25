@@ -1,6 +1,13 @@
 robot: "g1"  # Robot name, "go2", "b2", "b2w", "h1", "go2w", "g1", "h2", "as2"
 robot_scene: "scene_29dof.xml" # Robot scene, /unitree_robots/[robot]/scene.xml 
 
+# One 10 Hz worker per sensor; keep raycast CPU below the walking controller.
+lidar:
+  ray_threads: 1   # OpenMP threads used by each active LiDAR worker.
+  head_rays: 1200  # Livox head cloud for SLAM/localization.
+  neck_rays: 800   # Livox neck cloud for navigation safety.
+  waist_rays: 600  # Forward Seyond-style safety cloud.
+
 domain_id: 81  # Domain id
 interface: "" # Interface 
 # DDS IDL type: -1 auto, 0 unitree_go, 1 unitree_hg. Auto selects unitree_hg for as2.
