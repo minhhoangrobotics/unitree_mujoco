@@ -206,16 +206,22 @@
           <geom type="mesh" contype="0" conaffinity="0" group="1" density="0" rgba="0.7 0.7 0.7 1"
             mesh="waist_roll_link" />
           <site name="secondary_imu" size="0.01" pos="-0.03959 -0.00224 0.13792"/>
+          <!-- Forward abdomen sensor follows waist roll, independent of pitch. -->
+          <body name="seyond_waist_frame" pos="0.17 0 0.19" euler="0 0.26 0">
+            <site name="waist_lidar_site" pos="0 0 0" size="0.01"/>
+          </body>
           <body name="torso_link" pos="0 0 0.019">
-            <!-- Neck Lidar -->
-            <body name="neck_lidar" pos="0.0 0.0 0.15">
-              <!-- <geom type="cylinder" size="0.03 0.02" rgba="0 0 0 1"/> -->
-              <site name="neck_lidar_site" pos="0 0 0" size="0.01"/>
-            </body>
-            <!-- Head Lidar -->
-            <body name="head_lidar" pos="0.0 0.0 0.35">
-              <!-- <geom type="cylinder" size="0.03 0.02" rgba="0 0 0 1"/> -->
-              <site name="head_lidar_site" pos="0 0 0" size="0.01"/>
+            <!-- The 29-DoF G1 has a fixed head. Keep an explicit head_pitch_link
+                 so sensor mounts can follow a movable head in later models. -->
+            <body name="head_pitch_link" pos="0 0 0">
+              <!-- Head mesh spans approximately z=0.27..0.48 m here. The lower
+                   unit sits ahead of its shell, facing slightly downward. -->
+              <body name="livox_neck_frame" pos="0.12 0 0.34" euler="0 0.35 0">
+                <site name="neck_lidar_site" pos="0 0 0" size="0.01"/>
+              </body>
+              <body name="livox_head_frame" pos="0 0 0.52">
+                <site name="head_lidar_site" pos="0 0 0" size="0.01"/>
+              </body>
             </body>
 
             <inertial pos="0.00331658 0.000261533 0.179856"
