@@ -59,6 +59,8 @@ inline struct SimulationConfig
     int print_scene_information;
 
     int enable_elastic_band;
+    bool headless = false;
+    bool startup_support = false;
     int band_attached_link = 0;
     int lidar_ray_threads = 1;
     int head_lidar_rays = 1200;
@@ -122,6 +124,8 @@ inline po::variables_map helper(int argc, char** argv)
         ("robot,r", po::value<std::string>(&config.robot), "Robot type; -r go2")
         ("scene,s", po::value<std::filesystem::path>(&config.robot_scene), "Robot scene file; -s scene_terrain.xml")
         ("idl_type,t", po::value<int>(&config.idl_type), "DDS IDL type: -1 auto, 0 unitree_go, 1 unitree_hg")
+        ("headless", po::bool_switch(&config.headless), "Run physics and sensors without a GUI")
+        ("startup_support", po::value<bool>(&config.startup_support), "Suspend the floating base during startup (0/1)")
     ;
 
     po::variables_map vm;

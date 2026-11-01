@@ -9,6 +9,7 @@
 
   <build_depend>unitree_sdk2</build_depend>
   <depend>rcl_interfaces</depend>
+  <depend>std_srvs</depend>
 
   <export>
     <!-- We specify build_type as cmake because this is a raw CMake project, not ament_cmake -->

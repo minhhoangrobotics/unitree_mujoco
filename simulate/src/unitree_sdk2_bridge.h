@@ -39,7 +39,9 @@ public:
 
     }
 
+    virtual ~UnitreeSDK2BridgeBase() = default;
     virtual void start() {}
+    virtual void run() {}
 
     void printSceneInformation()
     {
@@ -180,9 +182,22 @@ public:
             std::lock_guard<std::mutex> lock(lowcmd->mutex_);
             for(int i(0); i<num_motor_; i++) {
                 auto & m = lowcmd->msg_.motor_cmd()[i];
+                // mj_step integrates qpos/qvel after evaluating sensordata.
+                // Use the current joint state for motor PD: a one-step-old
+                // derivative destabilizes stiff standing gains, especially yaw.
+                double q = mj_data_->sensordata[i];
+                double dq = mj_data_->sensordata[i + num_motor_];
+                if (mj_model_->actuator_trntype[i] == mjTRN_JOINT) {
+                    const int joint = mj_model_->actuator_trnid[2 * i];
+                    if (mj_model_->jnt_type[joint] == mjJNT_HINGE ||
+                        mj_model_->jnt_type[joint] == mjJNT_SLIDE) {
+                        q = mj_data_->qpos[mj_model_->jnt_qposadr[joint]];
+                        dq = mj_data_->qvel[mj_model_->jnt_dofadr[joint]];
+                    }
+                }
                 mj_data_->ctrl[i] = m.tau() +
-                                    m.kp() * (m.q() - mj_data_->sensordata[i]) +
-                                    m.kd() * (m.dq() - mj_data_->sensordata[i + num_motor_]);
+                                    m.kp() * (m.q() - q) +
+                                    m.kd() * (m.dq() - dq);
             }
         }
 

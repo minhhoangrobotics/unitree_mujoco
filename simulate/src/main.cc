@@ -46,6 +46,7 @@
 #include <rcl_interfaces/msg/set_parameters_result.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
 #include <sensor_msgs/point_cloud2_iterator.hpp>
+#include <std_srvs/srv/trigger.hpp>
 #include <tf2/LinearMath/Quaternion.h>
 #include <omp.h>
 
@@ -54,11 +55,40 @@ rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr neck_lidar_pub;
 rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr head_lidar_pub;
 rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr waist_lidar_pub;
 std::atomic<bool> show_factory_roof{true};
+std::atomic<bool> startup_support{false};
+std::atomic<bool> reset_requested{false};
+rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr reset_service;
+std::atomic<mujoco::Simulate*> active_simulator{nullptr};
 std::atomic<int> lidar_ray_threads{1};
 std::atomic<int> head_lidar_rays{1200};
 std::atomic<int> neck_lidar_rays{800};
 std::atomic<int> waist_lidar_rays{600};
 rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr sim_parameter_callback;
+
+// A removable simulation stand, controlled only at physics-step boundaries.
+// It never applies support forces once the controller requests standing/walking.
+void StepPhysics(mjModel* model, mjData* state) {
+  static mjModel* supported_model = nullptr;
+  static bool previously_supported = false;
+  static mjtNum pose[7];
+  const bool supported = startup_support.load();
+  if (supported && model->njnt > 0 && model->jnt_type[0] == mjJNT_FREE) {
+    if (!previously_supported || supported_model != model) {
+      mju_copy(pose, state->qpos, 7);
+      supported_model = model;
+    }
+    mju_copy(state->qpos, pose, 7);
+    mju_zero(state->qvel, 6);
+    mj_forward(model, state);
+    mj_step(model, state);
+    mju_copy(state->qpos, pose, 7);
+    mju_zero(state->qvel, 6);
+    mj_forward(model, state);
+  } else {
+    mj_step(model, state);
+  }
+  previously_supported = supported;
+}
 
 void SetFactoryRoofVisibility(mjModel* model, bool visible) {
   if (!model) return;
@@ -729,6 +759,11 @@ namespace
           applied_roof_visibility = requested_roof_visibility;
         }
 
+        if (m && reset_requested.exchange(false)) {
+          mj_resetData(m, d);
+          mj_forward(m, d);
+        }
+
         // run only if model is present
         if (m)
         {
@@ -778,7 +813,7 @@ namespace
               sim.speed_changed = false;
 
               // run single step, let next iteration deal with timing
-              mj_step(m, d);
+              StepPhysics(m, d);
               stepped = true;
             }
 
@@ -819,7 +854,7 @@ namespace
                 }
 
                 // call mj_step
-                mj_step(m, d);
+                StepPhysics(m, d);
 
                 stepped = true;
 
@@ -910,19 +945,8 @@ void PhysicsThread(mj::Simulate *sim, const char *filename)
   exit(0);
 }
 
-void *UnitreeSdk2BridgeThread(void *arg)
+std::unique_ptr<UnitreeSDK2BridgeBase> CreateUnitreeBridge()
 {
-  // Wait for mujoco data
-  while (true)
-  {
-    if (d)
-    {
-      std::cout << "Mujoco data is prepared" << std::endl;
-      break;
-    }
-    usleep(500000);
-  }
-
   unitree::robot::ChannelFactory::Instance()->Init(param::config.domain_id, param::config.interface);
 
 
@@ -948,12 +972,74 @@ void *UnitreeSdk2BridgeThread(void *arg)
     std::cout << "Using unitree_go DDS IDL for robot " << param::config.robot << std::endl;
     interface = std::make_unique<Go2Bridge>(m, d);
   }
+  return interface;
+}
+
+void *UnitreeSdk2BridgeThread(void *arg)
+{
+  while (!d) usleep(500000);
+  auto interface = CreateUnitreeBridge();
   interface->start();
   
   while (true)
   {
     sleep(1);
   }
+}
+
+int RunHeadless() {
+  char error[1024] = {};
+  m = mj_loadXML(param::config.robot_scene.c_str(), nullptr, error, sizeof(error));
+  if (!m) {
+    std::cerr << "Cannot load scene: " << error << std::endl;
+    rclcpp::shutdown();
+    return 1;
+  }
+  d = mj_makeData(m);
+  mj_forward(m, d);
+  auto bridge = CreateUnitreeBridge();
+  {
+    LidarScanner head("head_lidar_site", "livox_head_frame", head_lidar_pub,
+                      head_lidar_rays, LidarScanner::Pattern::Head, 10);
+    LidarScanner neck("neck_lidar_site", "livox_neck_frame", neck_lidar_pub,
+                      neck_lidar_rays, LidarScanner::Pattern::Neck, 15);
+    LidarScanner waist("waist_lidar_site", "seyond_waist_frame", waist_lidar_pub,
+                       waist_lidar_rays, LidarScanner::Pattern::Waist, 15);
+    auto deadline = std::chrono::steady_clock::now();
+    double last_scan = -1;
+    bool roof = show_factory_roof.load();
+    SetFactoryRoofVisibility(m, roof);
+    while (rclcpp::ok()) {
+      if (reset_requested.exchange(false)) {
+        mj_resetData(m, d);
+        mj_forward(m, d);
+        last_scan = -1;
+        deadline = std::chrono::steady_clock::now();
+      }
+      if (roof != show_factory_roof.load()) {
+        head.WaitIdle(); neck.WaitIdle(); waist.WaitIdle();
+        roof = show_factory_roof.load();
+        SetFactoryRoofVisibility(m, roof);
+      }
+      bridge->run();
+      StepPhysics(m, d);
+      if (d->time-last_scan >= .1) {
+        last_scan = d->time;
+        const auto stamp = ros_node->get_clock()->now();
+        head.Submit(m, d, stamp);
+        neck.Submit(m, d, stamp);
+        waist.Submit(m, d, stamp);
+      }
+      deadline += std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+          std::chrono::duration<double>(m->opt.timestep));
+      if (deadline < std::chrono::steady_clock::now()) deadline = std::chrono::steady_clock::now();
+      std::this_thread::sleep_until(deadline);
+    }
+  }
+  bridge.reset();
+  mj_deleteData(d); d = nullptr;
+  mj_deleteModel(m); m = nullptr;
+  return 0;
 }
 //------------------------------------------ main --------------------------------------------------
 
@@ -981,8 +1067,7 @@ void user_key_cb(GLFWwindow* window, int key, int scancode, int act, int mods) {
       }
     }
     if(key==GLFW_KEY_BACKSPACE) {
-      mj_resetData(m, d);
-      mj_forward(m, d);
+      reset_requested.store(true);
     }
   }
 }
@@ -994,7 +1079,15 @@ int main(int argc, char **argv)
   // Init ROS2
   rclcpp::init(argc, argv);
   ros_node = std::make_shared<rclcpp::Node>("unitree_mujoco_node");
+  reset_service = ros_node->create_service<std_srvs::srv::Trigger>(
+      "~/reset", [](const std_srvs::srv::Trigger::Request::SharedPtr,
+                    std_srvs::srv::Trigger::Response::SharedPtr response) {
+        reset_requested.store(true);
+        response->success = true;
+        response->message = "MuJoCo reset queued for the next physics update";
+      });
   ros_node->declare_parameter<bool>("show_factory_roof", true);
+  ros_node->declare_parameter<bool>("startup_support", false);
   ros_node->declare_parameter<int>("lidar_ray_threads", 1);
   ros_node->declare_parameter<int>("head_lidar_rays", 1200);
   ros_node->declare_parameter<int>("neck_lidar_rays", 800);
@@ -1005,10 +1098,10 @@ int main(int argc, char **argv)
         result.successful = true;
         for (const auto& parameter : parameters) {
           const auto& name = parameter.get_name();
-          if (name == "show_factory_roof") {
+          if (name == "show_factory_roof" || name == "startup_support") {
             if (parameter.get_type() != rclcpp::ParameterType::PARAMETER_BOOL) {
               result.successful = false;
-              result.reason = "show_factory_roof must be a boolean";
+              result.reason = name + " must be a boolean";
             }
           } else if (name == "lidar_ray_threads" || name == "head_lidar_rays" ||
                      name == "neck_lidar_rays" || name == "waist_lidar_rays") {
@@ -1030,6 +1123,7 @@ int main(int argc, char **argv)
         for (const auto& parameter : parameters) {
           const auto& name = parameter.get_name();
           if (name == "show_factory_roof") show_factory_roof.store(parameter.as_bool());
+          if (name == "startup_support") startup_support.store(parameter.as_bool());
           if (name == "lidar_ray_threads") lidar_ray_threads.store(parameter.as_int());
           if (name == "head_lidar_rays") head_lidar_rays.store(parameter.as_int());
           if (name == "neck_lidar_rays") neck_lidar_rays.store(parameter.as_int());
@@ -1043,6 +1137,7 @@ int main(int argc, char **argv)
   
   std::thread ros_thread([](){
     rclcpp::spin(ros_node);
+    if (auto* simulator = active_simulator.load()) simulator->exitrequest.store(true);
   });
 
 
@@ -1087,14 +1182,23 @@ int main(int argc, char **argv)
     if (!result.successful) mju_error("Invalid LiDAR parameter from config.yaml: %s", result.reason.c_str());
   }
   param::helper(argc, argv);
+  ros_node->set_parameter(rclcpp::Parameter("startup_support", param::config.startup_support));
   if(param::config.robot_scene.is_relative()) {
     param::config.robot_scene = proj_dir.parent_path() / "unitree_robots" / param::config.robot / param::config.robot_scene;
+  }
+
+  if (param::config.headless) {
+    const int result = RunHeadless();
+    ros_thread.join();
+    return result;
   }
 
   // simulate object encapsulates the UI
   auto sim = std::make_unique<mj::Simulate>(
     std::make_unique<mj::GlfwAdapter>(),
     &cam, &opt, &pert, /* is_passive = */ false);
+  active_simulator.store(sim.get());
+  if (!rclcpp::ok()) sim->exitrequest.store(true);
 
   std::thread unitree_thread(UnitreeSdk2BridgeThread, nullptr);
 
