@@ -534,8 +534,9 @@
     <gyro name="imu_gyro" site="imu" />
     <accelerometer name="imu_acc" site="imu" />
 
-    <framepos name="frame_pos" objtype="site" objname="imu" />
-    <framelinvel name="frame_vel" objtype="site" objname="imu" />
+    <!-- SportModeState reports the robot base, independently of IMU origin. -->
+    <framepos name="frame_pos" objtype="xbody" objname="pelvis" />
+    <framelinvel name="frame_vel" objtype="xbody" objname="pelvis" />
 
     <framequat name="secondary_imu_quat" objtype="site" objname="secondary_imu" />
     <gyro name="secondary_imu_gyro" site="secondary_imu" noise="5e-4" cutoff="34.9"/>
