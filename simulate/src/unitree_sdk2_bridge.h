@@ -42,6 +42,10 @@ public:
     virtual ~UnitreeSDK2BridgeBase() = default;
     virtual void start() {}
     virtual void run() {}
+    // The physics owner supplies the epoch at which sensordata was evaluated,
+    // which can precede integrated mjData::time by one simulation step.
+    void set_sample_time(double time) { sample_time_ = time; }
+    double sample_time() const { return sample_time_ >= 0. ? sample_time_ : mj_data_->time; }
 
     void printSceneInformation()
     {
@@ -73,6 +77,7 @@ public:
     }
 
 protected:
+    double sample_time_ = -1.;
     int num_motor_ = 0;
     int dim_motor_sensor_ = 0;
 
@@ -239,7 +244,7 @@ public:
                 lowstate->msg_.imu_state().accelerometer()[2] = mj_data_->sensordata[imu_acc_adr_ + 2];
             }
             
-            lowstate->msg_.tick() = std::round(mj_data_->time / 1e-3);
+            lowstate->msg_.tick() = std::llround(sample_time() / 1e-3);
             lowstate->unlockAndPublish();
         }
         // SportModeState is position feedback and diagnostics, not the 1 kHz

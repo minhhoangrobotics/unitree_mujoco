@@ -45,12 +45,61 @@
 #include <rclcpp/rclcpp.hpp>
 #include <rcl_interfaces/msg/set_parameters_result.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
+#include <sensor_msgs/msg/time_reference.hpp>
+#include <rosgraph_msgs/msg/clock.hpp>
+#if defined(__linux__)
+#include <sys/resource.h>
+#include <sys/syscall.h>
+#endif
 #include <sensor_msgs/point_cloud2_iterator.hpp>
 #include <std_srvs/srv/trigger.hpp>
 #include <tf2/LinearMath/Quaternion.h>
 #include <omp.h>
 
 std::shared_ptr<rclcpp::Node> ros_node;
+rclcpp::Publisher<rosgraph_msgs::msg::Clock>::SharedPtr clock_pub;
+rclcpp::Publisher<sensor_msgs::msg::TimeReference>::SharedPtr time_reference_pub;
+
+// One physical time axis for IMU integration, LiDAR and ROS consumers. A viewer
+// slowdown must never turn simulated seconds into wall-time sensor intervals.
+rclcpp::Time SimulationStamp(double physical_time) {
+  static const int64_t epoch = rclcpp::Clock(RCL_SYSTEM_TIME).now().nanoseconds() -
+                               static_cast<int64_t>(std::llround(physical_time * 1e9));
+  return rclcpp::Time(epoch + static_cast<int64_t>(std::llround(physical_time * 1e9)), RCL_ROS_TIME);
+}
+
+rclcpp::Time SimulationStamp(const mjData* state) { return SimulationStamp(state->time); }
+
+// mj_step leaves kinematics/sensordata at the force-evaluation epoch, before
+// integration advances qpos/qvel/time. Raycasts use those cached transforms,
+// so both clouds and LowState must carry that epoch, not the advanced time.
+double sensor_sample_time = 0.;
+void RefreshPhysicsState(mjModel* model, mjData* state) {
+  mj_forward(model, state);
+  sensor_sample_time = state->time;
+}
+
+void PublishSimulationClock(const mjData* state) {
+  static double previous = -1.;
+  if (previous >= 0. && state->time >= previous && state->time - previous < .005 - 1e-9)
+    return;
+  previous = state->time;
+  const auto stamp = SimulationStamp(state);
+  rosgraph_msgs::msg::Clock clock;
+  clock.clock = stamp;
+  clock_pub->publish(clock);
+  static double previous_reference = -1.;
+  if (previous_reference >= 0. && state->time >= previous_reference &&
+      state->time - previous_reference < 1.)
+    return;
+  previous_reference = state->time;
+  sensor_msgs::msg::TimeReference reference;
+  reference.header.stamp = stamp;
+  reference.time_ref = rclcpp::Time(static_cast<int64_t>(std::llround(state->time * 1e9)), RCL_ROS_TIME);
+  reference.source = "mujoco_tick";
+  time_reference_pub->publish(reference);
+}
+
 rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr neck_lidar_pub;
 rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr head_lidar_pub;
 rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr waist_lidar_pub;
@@ -60,14 +109,25 @@ std::atomic<bool> reset_requested{false};
 rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr reset_service;
 std::atomic<mujoco::Simulate*> active_simulator{nullptr};
 std::atomic<int> lidar_ray_threads{1};
+std::atomic<int> viewer_focus_event{-1};
 std::atomic<int> head_lidar_rays{1200};
 std::atomic<int> neck_lidar_rays{800};
 std::atomic<int> waist_lidar_rays{600};
 rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr sim_parameter_callback;
 
+// Only the physics thread may access mjData. DDS callbacks only update
+// message buffers; motor PD and state snapshots run at each physics step.
+std::unique_ptr<UnitreeSDK2BridgeBase> physics_bridge;
+std::unique_ptr<UnitreeSDK2BridgeBase> CreateUnitreeBridge();
+
 // A removable simulation stand, controlled only at physics-step boundaries.
 // It never applies support forces once the controller requests standing/walking.
-void StepPhysics(mjModel* model, mjData* state) {
+void StepPhysics(mjModel* model, mjData* state, UnitreeSDK2BridgeBase* bridge = nullptr) {
+  if (!bridge) bridge = physics_bridge.get();
+  if (bridge) {
+    bridge->set_sample_time(sensor_sample_time);
+    bridge->run();
+  }
   static mjModel* supported_model = nullptr;
   static bool previously_supported = false;
   static mjtNum pose[7];
@@ -79,14 +139,20 @@ void StepPhysics(mjModel* model, mjData* state) {
     }
     mju_copy(state->qpos, pose, 7);
     mju_zero(state->qvel, 6);
-    mj_forward(model, state);
+    RefreshPhysicsState(model, state);
+    sensor_sample_time = state->time;
     mj_step(model, state);
     mju_copy(state->qpos, pose, 7);
     mju_zero(state->qvel, 6);
-    mj_forward(model, state);
+    RefreshPhysicsState(model, state);
   } else {
+    sensor_sample_time = state->time;
     mj_step(model, state);
   }
+  // RK4 evaluates intermediate stages; refresh its cache once at the final
+  // integrated epoch. Euler/implicit stepping retain their pre-step cache.
+  if (model->opt.integrator == mjINT_RK4) RefreshPhysicsState(model, state);
+  PublishSimulationClock(state);
   previously_supported = supported;
 }
 
@@ -658,6 +724,7 @@ namespace
                               neck_lidar_rays, LidarScanner::Pattern::Neck, 15);
     LidarScanner waist_scanner("waist_lidar_site", "seyond_waist_frame", waist_lidar_pub,
                                waist_lidar_rays, LidarScanner::Pattern::Waist, 15);
+    if (m && d) physics_bridge = CreateUnitreeBridge();
     // cpu-sim syncronization point
     std::chrono::time_point<mj::Simulate::Clock> syncCPU;
     mjtNum syncSim = 0;
@@ -668,6 +735,10 @@ namespace
     // run until asked to exit
     while (!sim.exitrequest.load())
     {
+      const int focus = viewer_focus_event.exchange(-1);
+      if (focus >= 0) {
+        RCLCPP_INFO(ros_node->get_logger(), "Viewer focus=%d (observation only)", focus);
+      }
       if (sim.droploadrequest.load())
       {
         sim.LoadMessage(sim.dropfilename);
@@ -684,12 +755,14 @@ namespace
           head_scanner.ResetModel();
           neck_scanner.ResetModel();
           waist_scanner.ResetModel();
+          physics_bridge.reset();
           mj_deleteData(d);
           mj_deleteModel(m);
 
           m = mnew;
           d = dnew;
-          mj_forward(m, d);
+          RefreshPhysicsState(m, d);
+          physics_bridge = CreateUnitreeBridge();
 
           // allocate ctrlnoise
           free(ctrlnoise);
@@ -717,12 +790,14 @@ namespace
           head_scanner.ResetModel();
           neck_scanner.ResetModel();
           waist_scanner.ResetModel();
+          physics_bridge.reset();
           mj_deleteData(d);
           mj_deleteModel(m);
 
           m = mnew;
           d = dnew;
-          mj_forward(m, d);
+          RefreshPhysicsState(m, d);
+          physics_bridge = CreateUnitreeBridge();
 
           // allocate ctrlnoise
           free(ctrlnoise);
@@ -761,7 +836,7 @@ namespace
 
         if (m && reset_requested.exchange(false)) {
           mj_resetData(m, d);
-          mj_forward(m, d);
+          RefreshPhysicsState(m, d);
         }
 
         // run only if model is present
@@ -821,13 +896,15 @@ namespace
             else
             {
               bool measured = false;
+              int catchup_steps = 0;
               mjtNum prevSim = d->time;
 
               double refreshTime = simRefreshFraction / sim.refresh_rate;
 
               // step while sim lags behind cpu and within refreshTime
               while (Seconds((d->time - syncSim) * slowdown) < mj::Simulate::Clock::now() - syncCPU &&
-                     mj::Simulate::Clock::now() - startCPU < Seconds(refreshTime))
+                     mj::Simulate::Clock::now() - startCPU < Seconds(refreshTime) &&
+                     catchup_steps < 2)
               {
                 // measure slowdown before first step
                 if (!measured && elapsedSim)
@@ -855,6 +932,7 @@ namespace
 
                 // call mj_step
                 StepPhysics(m, d);
+                ++catchup_steps;
 
                 stepped = true;
 
@@ -864,6 +942,20 @@ namespace
                   break;
                 }
               }
+            }
+
+            // Never integrate a long wall-time backlog with held policy inputs.
+            // Give the policy/executor a scheduling opportunity between batches.
+            const double lag = Seconds(mj::Simulate::Clock::now() - syncCPU).count() / slowdown
+                               - (d->time - syncSim);
+            if (lag > 2. * m->opt.timestep) {
+              if (lag > .02) {
+                RCLCPP_WARN_THROTTLE(ros_node->get_logger(), *ros_node->get_clock(), 1000,
+                                    "Physics scheduling lag %.1f ms; discarding catch-up backlog",
+                                    lag * 1000.);
+              }
+              syncCPU = mj::Simulate::Clock::now();
+              syncSim = d->time;
             }
 
             // save current state to history buffer
@@ -882,7 +974,7 @@ namespace
               const bool lidar_requested = head_requested || neck_requested || waist_requested;
               if (d->time - last_lidar_time >= 0.1 && ros_node && lidar_requested) {
                 last_lidar_time = d->time;
-                const auto stamp = ros_node->get_clock()->now();
+                const auto stamp = SimulationStamp(sensor_sample_time);
                 if (head_requested) head_scanner.Submit(m, d, stamp);
                 if (neck_requested) neck_scanner.Submit(m, d, stamp);
                 if (waist_requested) waist_scanner.Submit(m, d, stamp);
@@ -899,7 +991,7 @@ namespace
           else
           {
             // run mj_forward, to update rendering and joint sliders
-            mj_forward(m, d);
+            RefreshPhysicsState(m, d);
             sim.speed_changed = true;
           }
         }
@@ -912,6 +1004,7 @@ namespace
 
 void PhysicsThread(mj::Simulate *sim, const char *filename)
 {
+
   // request loadmodel if file given (otherwise drag-and-drop)
   if (filename != nullptr)
   {
@@ -922,7 +1015,7 @@ void PhysicsThread(mj::Simulate *sim, const char *filename)
     if (d)
     {
       sim->Load(m, d, filename);
-      mj_forward(m, d);
+      RefreshPhysicsState(m, d);
 
       // allocate ctrlnoise
       free(ctrlnoise);
@@ -936,6 +1029,7 @@ void PhysicsThread(mj::Simulate *sim, const char *filename)
   }
 
   PhysicsLoop(*sim);
+  physics_bridge.reset();
 
   // delete everything we allocated
   free(ctrlnoise);
@@ -975,18 +1069,6 @@ std::unique_ptr<UnitreeSDK2BridgeBase> CreateUnitreeBridge()
   return interface;
 }
 
-void *UnitreeSdk2BridgeThread(void *arg)
-{
-  while (!d) usleep(500000);
-  auto interface = CreateUnitreeBridge();
-  interface->start();
-  
-  while (true)
-  {
-    sleep(1);
-  }
-}
-
 int RunHeadless() {
   char error[1024] = {};
   m = mj_loadXML(param::config.robot_scene.c_str(), nullptr, error, sizeof(error));
@@ -996,7 +1078,7 @@ int RunHeadless() {
     return 1;
   }
   d = mj_makeData(m);
-  mj_forward(m, d);
+  RefreshPhysicsState(m, d);
   auto bridge = CreateUnitreeBridge();
   {
     LidarScanner head("head_lidar_site", "livox_head_frame", head_lidar_pub,
@@ -1012,7 +1094,7 @@ int RunHeadless() {
     while (rclcpp::ok()) {
       if (reset_requested.exchange(false)) {
         mj_resetData(m, d);
-        mj_forward(m, d);
+        RefreshPhysicsState(m, d);
         last_scan = -1;
         deadline = std::chrono::steady_clock::now();
       }
@@ -1021,11 +1103,10 @@ int RunHeadless() {
         roof = show_factory_roof.load();
         SetFactoryRoofVisibility(m, roof);
       }
-      bridge->run();
-      StepPhysics(m, d);
+      StepPhysics(m, d, bridge.get());
       if (d->time-last_scan >= .1) {
         last_scan = d->time;
-        const auto stamp = ros_node->get_clock()->now();
+        const auto stamp = SimulationStamp(sensor_sample_time);
         head.Submit(m, d, stamp);
         neck.Submit(m, d, stamp);
         waist.Submit(m, d, stamp);
@@ -1079,6 +1160,9 @@ int main(int argc, char **argv)
   // Init ROS2
   rclcpp::init(argc, argv);
   ros_node = std::make_shared<rclcpp::Node>("unitree_mujoco_node");
+  clock_pub = ros_node->create_publisher<rosgraph_msgs::msg::Clock>("/clock", rclcpp::ClockQoS());
+  time_reference_pub = ros_node->create_publisher<sensor_msgs::msg::TimeReference>(
+      "/simulation/time_reference", rclcpp::QoS(1).reliable().transient_local());
   reset_service = ros_node->create_service<std_srvs::srv::Trigger>(
       "~/reset", [](const std_srvs::srv::Trigger::Request::SharedPtr,
                     std_srvs::srv::Trigger::Response::SharedPtr response) {
@@ -1193,6 +1277,23 @@ int main(int argc, char **argv)
     return result;
   }
 
+  // Create physics at normal priority before the renderer lowers its own
+  // priority. This also works without CAP_SYS_NICE on a host installation.
+  std::atomic<mj::Simulate*> physics_sim{nullptr};
+  std::thread physicsthreadhandle([&]() {
+    mj::Simulate* ready = nullptr;
+    while (!(ready = physics_sim.load())) {
+      if (!rclcpp::ok()) return;
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    PhysicsThread(ready, param::config.robot_scene.c_str());
+  });
+#if defined(__linux__)
+  // Mesa workers created by the viewer inherit this priority; camera drawing
+  // cannot compete equally with physics and the balance policy.
+  if (setpriority(PRIO_PROCESS, static_cast<id_t>(syscall(SYS_gettid)), 19) != 0)
+    RCLCPP_WARN(ros_node->get_logger(), "Could not lower viewer thread priority");
+#endif
   // simulate object encapsulates the UI
   auto sim = std::make_unique<mj::Simulate>(
     std::make_unique<mj::GlfwAdapter>(),
@@ -1200,10 +1301,11 @@ int main(int argc, char **argv)
   active_simulator.store(sim.get());
   if (!rclcpp::ok()) sim->exitrequest.store(true);
 
-  std::thread unitree_thread(UnitreeSdk2BridgeThread, nullptr);
-
   // start physics thread
-  std::thread physicsthreadhandle(&PhysicsThread, sim.get(), param::config.robot_scene.c_str());
+  physics_sim.store(sim.get());
+  // Focus is diagnostic only: it cannot change run state, motors or ROS commands.
+  glfwSetWindowFocusCallback(static_cast<mj::GlfwAdapter*>(sim->platform_ui.get())->window_,
+                            [](GLFWwindow*, int focused) { viewer_focus_event.store(focused); });
   // start simulation UI loop (blocking call)
   glfwSetKeyCallback(static_cast<mj::GlfwAdapter*>(sim->platform_ui.get())->window_,user_key_cb);
   sim->RenderLoop();
