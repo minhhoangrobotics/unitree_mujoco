@@ -103,7 +103,7 @@ void PublishSimulationClock(const mjData* state) {
 rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr neck_lidar_pub;
 rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr head_lidar_pub;
 rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr waist_lidar_pub;
-std::atomic<bool> show_factory_roof{true};
+std::atomic<bool> show_factory_roof{false};
 std::atomic<bool> startup_support{false};
 std::atomic<bool> reset_requested{false};
 rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr reset_service;
@@ -1170,7 +1170,7 @@ int main(int argc, char **argv)
         response->success = true;
         response->message = "MuJoCo reset queued for the next physics update";
       });
-  ros_node->declare_parameter<bool>("show_factory_roof", true);
+  ros_node->declare_parameter<bool>("show_factory_roof", false);
   ros_node->declare_parameter<bool>("startup_support", false);
   ros_node->declare_parameter<int>("lidar_ray_threads", 1);
   ros_node->declare_parameter<int>("head_lidar_rays", 1200);
